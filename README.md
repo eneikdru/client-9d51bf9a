@@ -87,3 +87,7 @@ python -m compileall -q app.py accounts.py scheduling.py storage.py
 ```
 
 Tests run against isolated temporary databases. They cover real registration/login/recovery, password validation and non-disclosure, throttling, session/token revocation, two independent client/master identities, onboarding atomicity/idempotency, publication, persistent identity, concurrency, rollback, ownership, CSRF, calendar revisions, buffers, breaks, DST, mounted routes, asset caching and storage/key initialization across releases. Optional OAuth callbacks use mocks; tests do not establish real provider credentials.
+
+## Release persistence check
+
+After deployment, compare `/api/status` installation_id with its pre-deployment value, then log in with a previously registered account and verify its master ID and booking history. This tests the actual host storage boundary; a successful source commit alone is not evidence of durable account data. QA profiles are unpublished after integration checks.
