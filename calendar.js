@@ -32,7 +32,7 @@ function clock(timestamp,zone){return new Date(timestamp*1000).toLocaleTimeStrin
 function money(value){return new Intl.NumberFormat('ru-RU',{style:'currency',currency:'GEL'}).format(value/100)}
 function windowsFor(day){const item=master();const weekday=(new Date(day+'T12:00:00Z').getUTCDay()+6)%7;return item.overrides[day]??item.weekly[String(weekday)]}
 function clearChoice(){chosen=null;$('confirmation').hidden=true}
-function setView(next){view=next;$('empty-state').hidden=!!master()||next!=='client';for(const name of ['client','settings','history'])$(name).hidden=name!==next;document.querySelectorAll('[data-tab]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.tab===next)));if(!master()&&next==='client')$('client').hidden=true;if(next==='history')loadBookings().catch(e=>notify(e.message,true));if(next==='settings'&&master()?.can_edit)renderSettings()}
+function setView(next){view=next;$('empty-state').hidden=!!master()||next!=='client';for(const name of ['client','settings','history'])$(name).hidden=name!==next;document.querySelectorAll('[data-tab]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.tab===next)));if(!master()&&next==='client')$('client').hidden=true;if(next==='history'&&user)loadBookings().catch(e=>notify(e.message,true));if(next==='settings'&&master()?.can_edit)renderSettings()}
 function renderCalendar(){
   const grid=$('calendar');grid.replaceChildren();$('month-title').textContent=new Date(month+'-01T12:00:00Z').toLocaleDateString('ru-RU',{month:'long',year:'numeric',timeZone:'UTC'});
   for(const title of ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']){const text=document.createElement('span');text.className='dow';text.textContent=title;grid.append(text)}
@@ -87,7 +87,7 @@ async function loadMasters(){
 async function boot(){
   const settings=await api('/api/config');csrf=settings.csrf;user=null;
   try{user=await api('/api/me');csrf=user.csrf}catch(error){if(error.status!==401)throw error}
-  $('welcome').hidden=!!user;$('workspace').hidden=!user;$('logout').hidden=!user;
+  $('welcome').hidden=!!user;$('workspace').hidden=!user;$('logout').hidden=!user;if(!user)$('guide').hidden=true;
   $('demo').hidden=!!user||!settings.demo_available;$('google').hidden=!!user||!settings.providers.google;$('facebook').hidden=!!user||!settings.providers.facebook;
   $('session-label').hidden=!user;$('session-label').textContent=user?.profile?.display_name||'Мой кабинет';
   $('become-master').hidden=!user||!!user.profile?.master_id;
@@ -126,7 +126,7 @@ function renderSettings(){
   $('weekly').replaceChildren();for(let day=0;day<7;day++){const row=document.createElement('div');row.className='day-row';const title=document.createElement('strong');title.textContent=weekdayNames[day];const controls=document.createElement('div');const windows=document.createElement('div');windows.dataset.weekday=day;for(const window of item.weekly[String(day)])addWindow(windows,window);const add=document.createElement('button');add.type='button';add.textContent='+ Интервал';add.className='secondary';add.onclick=()=>addWindow(windows);controls.append(windows,add);row.append(title,controls);$('weekly').append(row)}renderServiceSettings();
 }
 bind($('demo'),async()=>{await api('/api/demo-session',{method:'POST'});await boot();notify('Демоверсия готова. График и услуги можно менять в кабинете мастера.')});
-bind($('logout'),async()=>{await api('/api/logout',{method:'POST'});masters=[];selectedMaster='';selectedService='';await boot();notify('Вы вышли.')});
+bind($('logout'),async()=>{await api('/api/logout',{method:'POST'});masters=[];selectedMaster='';selectedService='';view='client';$('guide').hidden=true;await boot();notify('Вы вышли.')});
 for(const provider of ['google','facebook'])$(provider).onclick=()=>{location.href=new URL('auth/'+provider,document.baseURI).href};
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{notify('');setView(button.dataset.tab)});
 $('master').onchange=()=>{selectedMaster=$('master').value;selectedService='';$('work-date').value='';fillMaster()};
@@ -207,7 +207,7 @@ function openOnboarding(){
   if(!user){authMode('register');$('auth-role').value='master';$('auth-name').focus();return}
   $('welcome').hidden=true;$('workspace').hidden=true;$('guide').hidden=true;$('onboarding').hidden=false;
   $('onboard-name').value=user.profile.display_name;
-  if(!$('onboard-weekdays').children.length)weekdayNames.forEach((name,index)=>{const label=document.createElement('label');const input=document.createElement('input');input.type='checkbox';input.value=index;input.checked=index<5;label.append(input,document.createTextNode(name.slice(0,2)));$('onboard-weekdays').append(label)});
+  if(!$('onboard-weekdays').children.length)weekdayNames.forEach((name,index)=>{const label=document.createElement('label');const input=document.createElement('input');input.type='checkbox';input.value=index;input.checked=index<5;label.append(input,document.createTextNode(['Пн','Вт','Ср','Чт','Пт','Сб','Вс'][index]));$('onboard-weekdays').append(label)});
   onboardScreen(0);$('onboarding').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function validateOnboardStep(){
