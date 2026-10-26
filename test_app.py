@@ -74,6 +74,22 @@ def test_expired_token(client):
     assert book(client).status_code == 401
 
 
+def test_preview_links_stay_under_mount(client):
+    from html.parser import HTMLParser
+    from urllib.parse import urljoin
+    class Links(HTMLParser):
+        paths = []
+        def handle_starttag(self, tag, attrs):
+            if tag == 'a':
+                self.paths.append(dict(attrs)['href'])
+    parser = Links()
+    parser.feed(client.get('/').text)
+    for base in ['https://example.test/', 'https://example.test/api/preview/9d51bf9a/']:
+        for path in parser.paths:
+            assert urljoin(base, path).startswith(base)
+    assert 'fetch(new URL(' in client.get('/').text
+
+
 def test_browser_csrf_and_token(client):
     import base64
     import json
