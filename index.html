@@ -1,73 +1,25 @@
 <!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Запись к мастеру</title>
-  <style>
-    [hidden]{display:none!important}*{box-sizing:border-box}body{font:16px system-ui;background:#f6f3ec;color:#183b36;max-width:960px;margin:40px auto;padding:24px}h1{font-size:clamp(36px,7vw,60px);line-height:1.1}button,.login{display:inline-block;background:#183b36;color:white;padding:12px 20px;border:0;border-radius:8px;margin:6px 6px 6px 0;text-decoration:none;cursor:pointer;font:inherit}button:disabled{opacity:.5;cursor:default}article{background:white;padding:22px;margin:15px 0;border-radius:12px;border:1px solid #dce2dc}article p{margin:8px 0}.muted{color:#596b65}#message{white-space:pre-wrap}#mode{background:#e4ece4;padding:14px;border-radius:8px}a{color:#183b36}nav{margin:24px 0}footer{border-top:1px solid #cdd7cc;margin-top:40px;padding-top:20px}#slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}#slots article{margin:0}button:focus-visible,a:focus-visible{outline:3px solid #d98535;outline-offset:3px}
-  </style>
-</head>
-<body>
-  <p class="muted">МАСТЕРА · ОНЛАЙН-ЗАПИСЬ</p>
-  <h1>Ваше время.<br>Ваш мастер.</h1>
-  <p>Выберите услугу и время. Записи можно просмотреть и отменить здесь же.</p>
-  <p id="mode">Проверяем доступные способы входа…</p>
-  <nav aria-label="Вход">
-    <button id="google" hidden>Войти через Google</button>
-    <button id="facebook" hidden>Войти через Facebook</button>
-    <button id="demo" hidden>Попробовать демозапись</button>
-    <button id="logout" hidden>Выйти</button>
-  </nav>
-  <p id="message" role="status" aria-live="polite"></p>
-  <button id="retry" hidden>Обновить данные</button>
-  <h2>Свободное время</h2>
-  <main id="slots" aria-live="polite">Загружаем расписание…</main>
-  <section id="mine" hidden><h2>Мои записи</h2><div id="bookings"></div></section>
-  <footer><a href="docs">Документация API</a> · <a href="openapi.json">Схема OpenAPI</a>
-    <p class="muted">Подключение к Meta AI требует отдельной настройки аккаунта и доступа к Meta AI Connectors.</p>
-  </footer>
-  <script>
-    let csrf='', current=null, settings=null;
-    const $=id=>document.getElementById(id), message=$('message');
-    const explanations={
-      'Sign in required':'Сначала войдите или откройте деморежим.',
-      'Time is already booked':'Это время уже занято. Выберите другое окно.',
-      'Slot is in the past':'Это время уже прошло. Обновите расписание.',
-      'Invalid CSRF token':'Сессия устарела. Обновите страницу.',
-      'Started or completed appointments cannot be cancelled':'Встреча уже началась или завершилась — отмена недоступна.'
-    };
-    async function api(path,options={}){
-      const r=await fetch(new URL(path.replace(/^\//,''),document.baseURI),{...options,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...options.headers}});
-      let data;try{data=await r.json()}catch{throw Error('Сервис временно недоступен. Попробуйте обновить данные.')}
-      if(!r.ok){const e=Error(explanations[data.detail]||(typeof data.detail==='string'?data.detail:'Проверьте введённые данные.'));e.status=r.status;throw e}
-      return data;
-    }
-    function action(button,run){button.onclick=async()=>{button.disabled=true;message.textContent='';try{await run()}catch(e){message.textContent=e.message;$('retry').hidden=false}finally{button.disabled=false}}}
-    function appointment(parent,slot){
-      const row=document.createElement('article');
-      const title=document.createElement('strong');title.textContent=slot.service+' · '+slot.master.replace(/^demo:/,'');row.append(title);
-      const when=document.createElement('p');when.textContent=new Date(slot.start*1000).toLocaleString('ru-RU',{dateStyle:'medium',timeStyle:'short'})+' · '+Intl.DateTimeFormat().resolvedOptions().timeZone;row.append(when);
-      const price=document.createElement('p');price.textContent=new Intl.NumberFormat('ru-RU',{style:'currency',currency:'GEL'}).format(slot.price/100);row.append(price);parent.append(row);return row;
-    }
-    async function load(){
-      settings=await api('/api/config');csrf=settings.csrf;current=null;
-      try{current=await api('/api/me');csrf=current.csrf}catch(e){if(e.status!==401)throw e}
-      $('google').hidden=!!current||!settings.providers.google;$('facebook').hidden=!!current||!settings.providers.facebook;
-      $('demo').hidden=!!current;$('logout').hidden=!current;$('mine').hidden=!current;
-      $('mode').textContent=current?.mode==='demo'?'ДЕМОРЕЖИМ. Все мастера и записи вымышленные. Вы проверяете работу сервиса.':current?'Вы вошли. Можно создавать и отменять свои записи.':(!settings.providers.google&&!settings.providers.facebook?'Вход через Google и Facebook пока не настроен. Полный сценарий можно проверить в деморежиме.':'Войдите для записи к мастеру или попробуйте деморежим.');
-      const slots=await api('/api/slots');$('slots').replaceChildren();
-      if(!slots.length)$('slots').textContent=current?.mode==='demo'?'Все демонстрационные окна заняты. Попробуйте позже.':'Свободных окон пока нет. В деморежиме доступно тестовое расписание.';
-      for(const slot of slots){const row=appointment($('slots'),slot);if(current){const button=document.createElement('button');button.textContent='Записаться';row.append(button);const key=crypto.randomUUID();action(button,async()=>{const booking=await api('/api/bookings',{method:'POST',headers:{'Idempotency-Key':key},body:JSON.stringify({slot_id:slot.id})});await load();message.textContent=booking.status==='confirmed'?'Запись подтверждена. Она появилась в разделе «Мои записи».':'Эта запись уже отменена. Выберите время заново.'})}}
-      $('bookings').replaceChildren();
-      if(current){const bookings=await api('/api/bookings');if(!bookings.length)$('bookings').textContent='У вас пока нет записей.';for(const item of bookings){const row=item.appointment?appointment($('bookings'),item.appointment):document.createElement('article');const label=document.createElement('p');label.textContent=item.status==='confirmed'?'Подтверждена':'Отменена';if(!item.appointment)$('bookings').append(row);row.append(label);if(item.status==='confirmed'&&(!item.appointment||item.appointment.start*1000>Date.now())){const button=document.createElement('button');button.textContent='Отменить запись';row.append(button);action(button,async()=>{await api('/api/bookings/'+encodeURIComponent(item.id)+'/cancel',{method:'POST'});await load();message.textContent='Запись отменена. Время снова свободно.'})}}}
-      $('retry').hidden=true;
-    }
-    for(const provider of ['google','facebook'])$(provider).onclick=()=>{location.href=new URL('auth/'+provider,document.baseURI).href};
-    action($('demo'),async()=>{await api('/api/demo-session',{method:'POST'});await load()});
-    action($('logout'),async()=>{await api('/api/logout',{method:'POST'});await load();message.textContent='Вы вышли.'});
-    action($('retry'),load);
-    load().then(()=>{if(new URLSearchParams(location.search).has('notice'))message.textContent='Этот способ входа пока не настроен. Используйте деморежим.'}).catch(e=>{message.textContent=e.message;$('retry').hidden=false});
-  </script>
-</body>
-</html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Время · запись к мастеру</title>
+<style>
+:root{--ink:#183b36;--muted:#63736c;--line:#dce3da;--paper:#fff;--accent:#e8f0df}*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:#f6f5ef;color:var(--ink);font:16px/1.5 system-ui}header,main,footer{max-width:1180px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;border-bottom:1px solid var(--line)}.brand{font-weight:800;font-size:24px;letter-spacing:-1px}button,input,select{font:inherit}button{cursor:pointer;background:var(--ink);color:#fff;border:1px solid var(--ink);border-radius:10px;padding:11px 18px}button.secondary{color:var(--ink);background:transparent;border-color:var(--line)}button:disabled{opacity:.45;cursor:default}button:hover:not(:disabled){filter:brightness(.92)}input,select{color:var(--ink);padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:100%}label{display:block;font-size:14px;color:var(--muted)}label input,label select{display:block;width:100%;margin-top:6px}h1{font-size:clamp(36px,5vw,58px);line-height:1.1;letter-spacing:-2px;margin:24px 0}h2{font-size:24px;line-height:1.3}h3{font-size:18px}p{margin:10px 0}.muted{color:var(--muted)}.tag{display:inline-block;background:var(--accent);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:700}.card{border:1px solid var(--line);border-radius:16px;background:var(--paper);padding:24px}.grid{display:grid;grid-template-columns:minmax(280px,1fr) minmax(300px,1.2fr);gap:24px}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.row.between{justify-content:space-between}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0}.tabs button[aria-selected=true]{background:var(--ink);color:white}.tabs button{background:transparent;color:var(--ink);border-color:var(--line)}#message{padding:12px 0;white-space:pre-wrap}#message:empty{padding:0}.month{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin:16px 0}.month .dow{text-align:center;font-size:12px;color:var(--muted)}.month button{background:white;color:var(--ink);border-color:transparent;padding:10px 2px;border-radius:9px}.month button.selected{background:var(--ink);color:white}.month button.off{background:#f4f5f1;color:#7b877e}.month button.today{border-color:#bac9b6}.times{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:8px}.times button{background:white;color:var(--ink);border-color:var(--line)}.times button.selected{background:var(--accent);border-color:var(--ink)}#confirmation{margin-top:20px;background:#edf2e9}#confirmation button{width:100%;margin-top:12px}.section-gap{margin-top:24px}.window{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}.window input{width:120px}.window button{padding:7px 12px}.day-row{display:grid;grid-template-columns:110px 1fr;gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}.service-row{border-bottom:1px solid var(--line);padding:18px 0}.booking{padding:20px 0;border-bottom:1px solid var(--line)}.booking button{margin-top:10px}footer{font-size:13px;color:var(--muted)}a{color:var(--ink)}button:focus-visible,a:focus-visible{outline:3px solid #d6a35b;outline-offset:3px}.check{display:flex;gap:8px;align-items:center;margin:12px 0}.check input{width:auto;display:inline;margin:0}.check label{display:inline}.legend{font-size:13px}.danger{color:#a34125}details{margin-top:22px}summary{cursor:pointer;font-weight:600}#agenda .booking{font-size:14px}#welcome{max-width:760px;padding:40px 0}.stat{font-size:13px;padding:6px 10px;border:1px solid var(--line);border-radius:7px}@media(max-width:760px){.grid{grid-template-columns:1fr}header,main,footer{padding:18px}.card{padding:18px}.day-row{grid-template-columns:1fr;gap:2px}.fields{grid-template-columns:1fr 1fr}header .row{gap:5px}button{padding:10px 12px}.month button{padding:9px 2px}}
+</style></head><body>
+<header><div class="brand">время<span class="muted">.</span></div><div class="row"><span id="session-label" class="tag">ОНЛАЙН-ЗАПИСЬ</span><button id="logout" class="secondary" hidden>Выйти</button></div></header>
+<main>
+<div id="welcome"><span class="tag">КАЛЕНДАРЬ МАСТЕРА</span><h1>Выберите время.<br>Остальное уже учтено.</h1><p class="muted">Длительность услуги, перерывы и актуальный график мастера — в одном календаре.</p><p id="login-info">Загружаем…</p><div class="row"><button id="demo" hidden>Открыть демоверсию</button><button id="google" hidden>Войти через Google</button><button id="facebook" hidden>Войти через Facebook</button></div><p class="muted legend">Демоверсия содержит вымышленных мастеров. Можно менять настройки, записываться и отменять запись.</p></div>
+<p id="message" role="status" aria-live="polite"></p><button id="retry" class="secondary" hidden>Обновить данные</button>
+<div id="workspace" hidden>
+<div class="row between"><div><h1 id="page-title">Время для себя</h1><p id="mode-description" class="muted"></p></div><label>Мастер<select id="master"></select></label></div>
+<nav class="tabs" aria-label="Разделы"><button data-tab="client" aria-selected="true">Записаться</button><button data-tab="history" aria-selected="false">Мои записи</button><button data-tab="settings" aria-selected="false" id="settings-tab">Кабинет мастера</button></nav>
+<section id="client">
+<div class="grid"><div class="card"><label>Услуга<select id="service"></select></label><p id="service-description" class="muted"></p><div class="row between section-gap"><button id="month-prev" class="secondary" aria-label="Предыдущий месяц">←</button><strong id="month-title"></strong><button id="month-next" class="secondary" aria-label="Следующий месяц">→</button></div><div class="month" id="calendar" aria-label="Календарь записи"></div><label>Выбрать дату<input type="date" id="booking-date"></label><p class="legend muted">Часы указаны по времени мастера: <span id="timezone-label"></span>. Серые даты — выходные по графику.</p></div>
+<div class="card"><h2 id="date-title">Свободное время</h2><p id="working-hours" class="muted"></p><div id="times" class="times" aria-live="polite"></div><div id="confirmation" class="card" hidden><h3>Ваша запись</h3><p id="summary"></p><p id="summary-price"></p><button id="confirm">Подтвердить запись</button></div><p class="muted legend section-gap">Время обновляется по графику мастера. Занятые интервалы и перерывы исключены автоматически.</p></div></div>
+</section>
+<section id="history" hidden><div class="card"><h2>Мои записи</h2><div id="bookings"></div></div></section>
+<section id="settings" hidden>
+<div class="grid"><div class="card"><span class="tag">БЫСТРОЕ ИЗМЕНЕНИЕ ДНЯ</span><h2>Сегодня другой график?</h2><p class="muted">Измените только выбранный день. Шаблон остальных недель останется прежним.</p><div class="row"><button id="work-today" class="secondary">Сегодня</button><button id="work-tomorrow" class="secondary">Завтра</button></div><label class="section-gap">Дата<input type="date" id="work-date"></label><p id="day-source" class="muted"></p><div class="row"><button id="day-off" class="secondary">Сделать выходным</button><button id="day-add" class="secondary">+ Рабочий интервал</button></div><div id="day-windows"></div><p class="legend muted">Например, 10:00–13:00 и 14:00–19:00 — рабочий день с обедом. Можно добавить несколько перерывов.</p><label class="check"><input type="checkbox" id="repeat-week">Применить также к следующим 6 дням</label><div class="row"><button id="save-day">Сохранить график дня</button><button id="reset-day" class="secondary">Вернуть шаблон недели</button></div><p id="day-dirty" class="legend danger" hidden>Есть несохранённые изменения.</p></div>
+<div class="card"><h2>Записи на выбранный день</h2><p class="muted">Существующие записи сохраняются. График нельзя сократить так, чтобы запись оказалась вне рабочего времени.</p><div id="agenda"></div></div></div>
+<details class="card section-gap" open><summary>Услуги, цены и длительность</summary><p class="muted">Цена — в GEL. Новые значения применяются к новым записям; существующие сохраняют прежние условия.</p><div id="service-settings"></div><button id="add-service" class="secondary section-gap">+ Добавить услугу</button></details>
+<details class="card section-gap"><summary>Профиль и шаблон недели</summary><form id="profile-form"><div class="fields section-gap"><label>Имя мастера<input id="master-name" required maxlength="80"></label><label>Часовой пояс<input id="master-timezone" required placeholder="Asia/Tbilisi"></label><label>Шаг начала записи, мин<input id="step" type="number" min="5" max="120" required></label><label>Минимум до визита, мин<input id="notice" type="number" min="0" max="10080" required></label><label>Запись вперёд, дней<input id="horizon" type="number" min="1" max="180" required></label></div><h3>Обычная неделя</h3><p class="muted">Добавьте рабочие интервалы. Пустой день — выходной. Индивидуальные изменения дат имеют приоритет.</p><div id="weekly"></div><button type="submit" class="section-gap">Сохранить профиль и неделю</button></form></details>
+</section></div></main>
+<footer><a href="docs">Документация API</a> · <a href="openapi.json">OpenAPI</a><p>Демо — для проверки интерфейса. Подключение внешних агентов и реальной авторизации настраивается отдельно.</p></footer>
+<script src="calendar.js" defer></script></body></html>
