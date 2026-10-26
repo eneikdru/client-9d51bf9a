@@ -4,7 +4,7 @@ let availabilityRequest=0, agendaRequest=0;
 const $=id=>document.getElementById(id);
 const weekdayNames=['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота','Воскресенье'];
 const errors={
-  'Sign in required':'Войдите или откройте демоверсию.',
+  'Sign in required':'Войдите в аккаунт, чтобы сохранить запись.',
   'Invalid CSRF token':'Сессия устарела. Обновите страницу.',
   'Time is already booked':'Это время уже занято. Выберите другое начало записи.',
   'Schedule or service changed. Refresh available times':'Мастер изменил график или услугу. Обновите свободное время.',
@@ -18,7 +18,7 @@ const errors={
 async function api(path,options={}){
   const response=await fetch(new URL(path.replace(/^\//,''),document.baseURI),{...options,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...options.headers}});
   let data;try{data=await response.json()}catch{throw Error('Сервис временно недоступен. Обновите данные.')}
-  if(!response.ok){let detail=data.detail;if(Array.isArray(detail))detail='Проверьте интервалы, часовой пояс и числовые значения. Рабочие интервалы не должны пересекаться.';const error=Error(errors[detail]||detail||'Не удалось выполнить запрос.');error.status=response.status;throw error}
+  if(!response.ok){let detail=data.detail;if(Array.isArray(detail))detail=detail.some(e=>String(e.loc).includes('password'))?'Пароль должен содержать от 12 до 128 символов.':'Проверьте заполнение полей, формат логина, интервалы и числовые значения.';const error=Error(errors[detail]||detail||'Не удалось выполнить запрос.');error.status=response.status;throw error}
   return data;
 }
 function notify(text,error=false){$('message').textContent=text;$('message').classList.toggle('danger',error);$('retry').hidden=!error}
@@ -32,7 +32,7 @@ function clock(timestamp,zone){return new Date(timestamp*1000).toLocaleTimeStrin
 function money(value){return new Intl.NumberFormat('ru-RU',{style:'currency',currency:'GEL'}).format(value/100)}
 function windowsFor(day){const item=master();const weekday=(new Date(day+'T12:00:00Z').getUTCDay()+6)%7;return item.overrides[day]??item.weekly[String(weekday)]}
 function clearChoice(){chosen=null;$('confirmation').hidden=true}
-function setView(next){view=next;for(const name of ['client','settings','history'])$(name).hidden=name!==next;document.querySelectorAll('[data-tab]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.tab===next)));if(next==='history')loadBookings().catch(e=>notify(e.message,true));if(next==='settings')renderSettings()}
+function setView(next){view=next;$('empty-state').hidden=!!master()||next!=='client';for(const name of ['client','settings','history'])$(name).hidden=name!==next;document.querySelectorAll('[data-tab]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.tab===next)));if(!master()&&next==='client')$('client').hidden=true;if(next==='history')loadBookings().catch(e=>notify(e.message,true));if(next==='settings'&&master()?.can_edit)renderSettings()}
 function renderCalendar(){
   const grid=$('calendar');grid.replaceChildren();$('month-title').textContent=new Date(month+'-01T12:00:00Z').toLocaleDateString('ru-RU',{month:'long',year:'numeric',timeZone:'UTC'});
   for(const title of ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']){const text=document.createElement('span');text.className='dow';text.textContent=title;grid.append(text)}
@@ -42,7 +42,7 @@ function renderCalendar(){
 }
 async function chooseDate(day){if(!day)return;selectedDay=day;month=day.slice(0,7);renderCalendar();clearChoice();try{await loadAvailability()}catch(e){notify(e.message,true)}}
 async function loadAvailability(){
-  const sequence=++availabilityRequest;clearChoice();$('times').textContent='Проверяем свободное время…';$('date-title').textContent=dayLabel(selectedDay);$('timezone-label').textContent=master().timezone;
+  const sequence=++availabilityRequest;clearChoice();if(!master())return;$('times').textContent='Проверяем свободное время…';$('date-title').textContent=dayLabel(selectedDay);$('timezone-label').textContent=master().timezone;
   if(!selectedService){$('times').textContent='У мастера пока нет активных услуг.';$('working-hours').textContent='';return}
   const params=new URLSearchParams({master_id:selectedMaster,service_id:selectedService,day:selectedDay});
   const data=await api('/api/calendar/availability?'+params);if(sequence!==availabilityRequest)return;
@@ -56,22 +56,50 @@ function renderServices(){
   const item=service();$('service-description').textContent=item?`${item.duration_minutes} мин · перерыв после услуги ${item.buffer_minutes} мин · начало каждые ${master().step_minutes} мин`:'';
 }
 function fillMaster(){
-  $('settings-tab').hidden=!master().can_edit;$('mode-description').textContent=master().demo?'ДЕМОВЕРСИЯ · Ваши изменения сохраняются в этой демосессии. Все мастера вымышленные.':'Актуальное расписание мастера';
-  const minimum=today(),maximum=addDays(minimum,master().horizon_days);if(!selectedDay||selectedDay<minimum||selectedDay>maximum)selectedDay=addDays(minimum,1);month=selectedDay.slice(0,7);renderServices();renderCalendar();if(view==='settings'&&master().can_edit)renderSettings();else if(view==='settings')setView('client');loadAvailability().catch(e=>notify(e.message,true));
+  const item=master();
+  $('settings-tab').hidden=!user||!item.can_edit;
+  $('master-label').hidden=false;
+  $('empty-state').hidden=true;
+  $('page-title').textContent=item.can_edit?'Ваш календарь':'Запланируем ваш визит';
+  $('mode-description').textContent=item.can_edit?'Ваш график, услуги и записи — под рукой.':'Выберите услугу и удобное свободное время.';
+  $('publication-bar').hidden=!item.can_edit||item.demo;
+  $('publication-status').textContent=item.published?'Запись открыта клиентам':'Запись приостановлена';
+  $('toggle-publication').textContent=item.published?'Приостановить запись':'Открыть запись';
+  const share=new URL('./',location.href);share.searchParams.set('master',item.id);$('share-link').value=share.href;
+  const minimum=today(),maximum=addDays(minimum,item.horizon_days);if(!selectedDay||selectedDay<minimum||selectedDay>maximum)selectedDay=addDays(minimum,1);
+  month=selectedDay.slice(0,7);renderServices();renderCalendar();
+  if(view==='settings'&&item.can_edit)renderSettings();else if(view==='settings')view='client';
+  setView(view);loadAvailability().catch(e=>notify(e.message,true));
 }
 async function loadMasters(){
-  masters=await api('/api/masters');const select=$('master');select.replaceChildren();for(const item of masters){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;select.append(option)}
+  masters=await api(user?'/api/masters':'/api/catalog');
+  const select=$('master');select.replaceChildren();for(const item of masters){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;select.append(option)}
+  const linked=new URLSearchParams(location.search).get('master');
+  if(!selectedMaster&&linked&&masters.some(item=>item.id===linked))selectedMaster=linked;
   if(!masters.some(item=>item.id===selectedMaster))selectedMaster=masters[0]?.id||'';select.value=selectedMaster;
-  if(master())fillMaster();else{$('workspace').hidden=true;notify('Мастера пока не добавлены. В демоверсии доступен пример каталога.')}
+  $('workspace').hidden=!user&&!masters.length;
+  if(master())fillMaster();else{
+    $('settings-tab').hidden=true;$('master-label').hidden=true;$('client').hidden=true;$('settings').hidden=true;
+    $('page-title').textContent='Ваше время впереди';$('mode-description').textContent='Записи будут сохраняться в этом аккаунте.';
+    $('empty-state').hidden=view!=='client';setView(view);
+  }
 }
 async function boot(){
-  const settings=await api('/api/config');csrf=settings.csrf;user=null;try{user=await api('/api/me');csrf=user.csrf}catch(error){if(error.status!==401)throw error}
-  $('welcome').hidden=!!user;$('workspace').hidden=!user;$('logout').hidden=!user;$('demo').hidden=!!user;$('google').hidden=!!user||!settings.providers.google;$('facebook').hidden=!!user||!settings.providers.facebook;$('session-label').textContent=user?.mode==='demo'?'ДЕМОВЕРСИЯ':user?'ЛИЧНЫЙ КАБИНЕТ':'ОНЛАЙН-ЗАПИСЬ';$('login-info').textContent=settings.providers.google||settings.providers.facebook?'Войдите или проверьте сервис на демонстрационных данных.':'Внешний вход пока не подключён. Демоверсия работает без Google и Facebook.';
-  if(user){await loadMasters();if(view==='history')await loadBookings()}
+  const settings=await api('/api/config');csrf=settings.csrf;user=null;
+  try{user=await api('/api/me');csrf=user.csrf}catch(error){if(error.status!==401)throw error}
+  $('welcome').hidden=!!user;$('workspace').hidden=!user;$('logout').hidden=!user;
+  $('demo').hidden=!!user||!settings.demo_available;$('google').hidden=!!user||!settings.providers.google;$('facebook').hidden=!!user||!settings.providers.facebook;
+  $('session-label').hidden=!user;$('session-label').textContent=user?.profile?.display_name||'Мой кабинет';
+  $('become-master').hidden=!user||!!user.profile?.master_id;
+  $('onboarding').hidden=true;
+  await loadMasters();
+  if(user&&view==='history')await loadBookings();
+  if(user?.profile?.role==='master'&&!user.profile.master_id)openOnboarding();
+  else if(user&&!user.profile.guide_seen)showGuide();
 }
 async function loadBookings(){
   const rows=await api('/api/bookings');const container=$('bookings');container.replaceChildren();if(!rows.length)container.textContent='У вас пока нет записей.';
-  for(const item of rows){const row=document.createElement('article');row.className='booking';const p=document.createElement('p'),detail=item.appointment;let zone=masters.find(m=>m.name===detail?.master)?.timezone||'Asia/Tbilisi';p.textContent=detail?detail.service+' · '+detail.master+' · '+new Date(detail.start*1000).toLocaleString('ru-RU',{timeZone:zone,dateStyle:'medium',timeStyle:'short'})+' · '+money(detail.price):item.slot;row.append(p);const status=document.createElement('span');status.className='tag';status.textContent=item.status==='cancelled'?'Отменена':detail?.start*1000<=Date.now()?'Визит начался / завершён':'Подтверждена';row.append(status);if(item.status==='confirmed'&&(!detail||detail.start*1000>Date.now())){const button=document.createElement('button');button.className='secondary';button.textContent='Отменить запись';bind(button,async()=>{await api('/api/bookings/'+encodeURIComponent(item.id)+'/cancel',{method:'POST'});await loadBookings();await loadAvailability();notify('Запись отменена. Время снова свободно.')});row.append(document.createElement('br'),button)}container.append(row)}
+  for(const item of rows){const row=document.createElement('article');row.className='booking';const p=document.createElement('p'),detail=item.appointment;let zone=masters.find(m=>m.name===detail?.master)?.timezone||'Asia/Tbilisi';p.textContent=detail?detail.service+' · '+detail.master+' · '+new Date(detail.start*1000).toLocaleString('ru-RU',{timeZone:zone,dateStyle:'medium',timeStyle:'short'})+' · '+money(detail.price):item.slot;row.append(p);const status=document.createElement('span');status.className='tag';status.textContent=item.status==='cancelled'?'Отменена':detail?.start*1000<=Date.now()?'Визит начался / завершён':'Подтверждена';row.append(status);if(item.status==='confirmed'&&(!detail||detail.start*1000>Date.now())){const button=document.createElement('button');button.className='secondary';button.textContent='Отменить запись';bind(button,async()=>{await api('/api/bookings/'+encodeURIComponent(item.id)+'/cancel',{method:'POST'});await loadBookings();if(master())await loadAvailability();notify('Запись отменена. Время снова свободно.')});row.append(document.createElement('br'),button)}container.append(row)}
 }
 function addWindow(container,window={start:'10:00',end:'19:00'},dirty=()=>{}){
   const row=document.createElement('div');row.className='window';for(const [key,label] of [['start','Начало интервала'],['end','Конец интервала']]){const input=document.createElement('input');input.type='time';input.required=true;input.value=window[key];input.dataset.boundary=key;input.setAttribute('aria-label',label);input.oninput=dirty;row.append(input)}const remove=document.createElement('button');remove.type='button';remove.className='secondary';remove.textContent='Убрать';remove.onclick=()=>{row.remove();dirty()};row.append(remove);container.append(row);
@@ -82,7 +110,7 @@ function renderDayEditor(){
   const day=$('work-date').value;if(!day)return;const container=$('day-windows');container.replaceChildren();for(const window of windowsFor(day))addWindow(container,window,dirtyDay);$('day-source').textContent=Object.hasOwn(master().overrides,day)?'Индивидуальный график на эту дату':'По шаблону недели';$('day-dirty').hidden=true;$('repeat-week').checked=false;loadAgenda().catch(e=>notify(e.message,true));
 }
 async function loadAgenda(){
-  const sequence=++agendaRequest,id=selectedMaster,day=$('work-date').value;const rows=await api('/api/masters/'+encodeURIComponent(id)+'/agenda?'+new URLSearchParams({day}));if(sequence!==agendaRequest)return;$('agenda').replaceChildren();if(!rows.length)$('agenda').textContent='Записей на этот день пока нет.';for(const item of rows){const p=document.createElement('p');p.className='booking';p.textContent=clock(item.start,master().timezone)+'–'+clock(item.end,master().timezone)+' · '+item.service+' · '+(item.status==='confirmed'?'подтверждена':'отменена')+' (включая перерыв)';$('agenda').append(p)}
+  const sequence=++agendaRequest,id=selectedMaster,day=$('work-date').value;const rows=await api('/api/masters/'+encodeURIComponent(id)+'/agenda?'+new URLSearchParams({day}));if(sequence!==agendaRequest)return;$('agenda').replaceChildren();if(!rows.length)$('agenda').textContent='Записей на этот день пока нет.';for(const item of rows){const p=document.createElement('p');p.className='booking';p.textContent=clock(item.start,master().timezone)+'–'+clock(item.end,master().timezone)+' · '+item.service+' · '+(item.status==='confirmed'?'подтверждена':'отменена')+' (включая перерыв)'+(item.customer_name?' · '+item.customer_name:'');$('agenda').append(p)}
 }
 function inputField(title,value,type='text',min,max){const label=document.createElement('label');label.textContent=title;const input=document.createElement('input');input.type=type;input.value=value;input.required=true;if(min!==undefined)input.min=min;if(max!==undefined)input.max=max;if(type==='text')input.maxLength=80;label.append(input);return {label,input}}
 function renderServiceSettings(){
@@ -105,7 +133,7 @@ $('master').onchange=()=>{selectedMaster=$('master').value;selectedService='';$(
 $('service').onchange=()=>{selectedService=$('service').value;renderServices();loadAvailability().catch(e=>notify(e.message,true))};
 $('booking-date').onchange=()=>chooseDate($('booking-date').value);
 for(const [id,direction] of [['month-prev',-1],['month-next',1]])$(id).onclick=()=>{const date=new Date(month+'-01T12:00:00Z');date.setUTCMonth(date.getUTCMonth()+direction);month=date.toISOString().slice(0,7);renderCalendar()};
-bind($('confirm'),async()=>{if(!chosen)return;const snapshot=chosen;await api('/api/bookings',{method:'POST',headers:{'Idempotency-Key':snapshot.key},body:JSON.stringify({slot_id:snapshot.id})});await loadAvailability();await loadBookings();setView('history');notify('Запись подтверждена. Вы найдёте её здесь, в разделе «Мои записи».')});
+bind($('confirm'),async()=>{if(!chosen)return;if(!user){authMode('login');$('auth-username').focus();notify('Войдите или создайте аккаунт — запись останется в вашей истории.');return;}const snapshot=chosen;await api('/api/bookings',{method:'POST',headers:{'Idempotency-Key':snapshot.key},body:JSON.stringify({slot_id:snapshot.id})});await loadAvailability();await loadBookings();setView('history');notify('Запись подтверждена. Вы найдёте её здесь, в разделе «Мои записи».')});
 $('work-date').onchange=renderDayEditor;
 for(const [id,offset] of [['work-today',0],['work-tomorrow',1]])$(id).onclick=()=>{$('work-date').value=addDays(today(),offset);renderDayEditor()};
 $('day-off').onclick=()=>{$('day-windows').replaceChildren();dirtyDay()};$('day-add').onclick=()=>{addWindow($('day-windows'),undefined,dirtyDay);dirtyDay()};
@@ -114,4 +142,96 @@ bind($('reset-day'),async()=>{const result=await api('/api/masters/'+encodeURICo
 $('add-service').onclick=()=>serviceEditor(null);
 $('profile-form').onsubmit=async event=>{event.preventDefault();const button=event.submitter;button.disabled=true;try{const weekly={};$('weekly').querySelectorAll('[data-weekday]').forEach(container=>weekly[container.dataset.weekday]=readWindows(container));const payload={name:$('master-name').value,timezone:$('master-timezone').value,step_minutes:Number($('step').value),notice_minutes:Number($('notice').value),horizon_days:Number($('horizon').value),weekly,revision:master().revision};await api('/api/masters/'+encodeURIComponent(selectedMaster),{method:'POST',body:JSON.stringify(payload)});await loadMasters();notify('Профиль и шаблон недели сохранены. Индивидуальные изменения дат остались прежними.')}catch(e){notify(e.message,true)}finally{button.disabled=false}};
 bind($('retry'),async()=>{await boot();notify('Данные обновлены.')});
+
+// Persistent accounts and a short, task-oriented introduction.
+let loginMode='login',onboardStep=0,afterRecovery=null;
+Object.assign(errors,{
+  'Invalid username or password':'Неверный логин или пароль.',
+  'This username is already taken':'Этот логин уже занят. Попробуйте другой.',
+  'Too many attempts. Try again later':'Слишком много попыток. Подождите и попробуйте позже.',
+  'Invalid username or recovery code':'Проверьте логин и личный код восстановления.',
+  'Sign out before switching accounts':'Сначала выйдите из текущего аккаунта.',
+  'Add an active service and at least one working day':'Добавьте активную услугу и хотя бы один рабочий день.'
+});
+function authMode(mode){
+  loginMode=mode;const signup=mode==='register';
+  $('auth-form').hidden=false;$('recovery-form').hidden=true;$('show-recovery').hidden=signup;
+  $('auth-title').textContent=signup?'Начнём с знакомства':'С возвращением';
+  $('login-info').textContent=signup?'Один аккаунт для всех ваших записей.':'Ваши планы и записи — в одном месте.';
+  $('auth-name-label').hidden=!signup;$('auth-confirm-label').hidden=!signup;$('auth-role-label').hidden=!signup;
+  $('auth-name').required=signup;$('auth-confirm').required=signup;
+  $('auth-password').autocomplete=signup?'new-password':'current-password';
+  $('auth-login-tab').setAttribute('aria-selected',String(!signup));$('auth-register-tab').setAttribute('aria-selected',String(signup));
+  $('auth-submit').textContent=signup?'Создать аккаунт →':'Войти в кабинет →';
+}
+$('auth-login-tab').onclick=()=>authMode('login');$('auth-register-tab').onclick=()=>authMode('register');
+$('show-recovery').onclick=()=>{$('auth-form').hidden=true;$('recovery-form').hidden=false;$('show-recovery').hidden=true;$('auth-title').textContent='Вернёмся к вашим планам';$('login-info').textContent='Восстановление по личному резервному коду.';$('recover-username').value=$('auth-username').value};
+$('recovery-back').onclick=()=>authMode('login');
+function recoveryDialog(code,next){
+  afterRecovery=next;$('recovery-value').textContent=code;$('recovery-saved').checked=false;$('recovery-continue').disabled=true;$('copy-recovery').textContent='Скопировать код';$('recovery-dialog').showModal();
+}
+$('recovery-dialog').addEventListener('cancel',event=>event.preventDefault());
+$('recovery-saved').onchange=()=>{$('recovery-continue').disabled=!$('recovery-saved').checked};
+bind($('copy-recovery'),async()=>{await navigator.clipboard.writeText($('recovery-value').textContent);$('copy-recovery').textContent='Код скопирован'});
+bind($('recovery-continue'),async()=>{$('recovery-dialog').close();$('recovery-value').textContent='';const next=afterRecovery;afterRecovery=null;await next?.()});
+$('auth-form').onsubmit=async event=>{
+  event.preventDefault();const signup=loginMode==='register';
+  if(signup&&$('auth-password').value!==$('auth-confirm').value){notify('Пароли не совпадают.',true);return}
+  const button=$('auth-submit');button.disabled=true;notify('');
+  try{
+    const payload={username:$('auth-username').value,password:$('auth-password').value};
+    if(signup){payload.display_name=$('auth-name').value;payload.role=$('auth-role').value}
+    const result=await api('/api/account/'+(signup?'register':'login'),{method:'POST',body:JSON.stringify(payload)});
+    csrf=result.csrf;$('auth-password').value='';$('auth-confirm').value='';
+    if(signup)recoveryDialog(result.recovery_code,boot);else await boot();
+  }catch(error){notify(error.message,true)}finally{button.disabled=false}
+};
+$('recovery-form').onsubmit=async event=>{
+  event.preventDefault();const button=event.submitter;button.disabled=true;
+  try{const result=await api('/api/account/recover',{method:'POST',body:JSON.stringify({username:$('recover-username').value,recovery_code:$('recover-code').value,new_password:$('recover-password').value})});csrf=result.csrf;$('recover-code').value='';$('recover-password').value='';recoveryDialog(result.recovery_code,async()=>{await boot();notify('Пароль обновлён. Прежний резервный код больше не действует.')})}catch(error){notify(error.message,true)}finally{button.disabled=false}
+};
+function showGuide(){
+  const isMaster=!!user?.profile?.master_id;
+  $('guide-title').textContent=isMaster?'Ваш кабинет мастера за минуту':'Три шага до вашей записи';
+  const steps=isMaster?['Настройте услуги и обычную неделю','Меняйте отдельные даты в ежедневнике','Поделитесь ссылкой для записи']:['Выберите мастера и услугу','Выберите дату и свободное время','Подтвердите — запись появится в истории'];
+  $('guide-steps').replaceChildren();steps.forEach((text,index)=>{const span=document.createElement('span');const number=document.createElement('b');number.textContent=index+1;span.append(number,document.createTextNode(text));$('guide-steps').append(span)});$('guide').hidden=false;
+}
+$('help').onclick=()=>{showGuide();$('guide').scrollIntoView({behavior:'smooth',block:'center'})};
+bind($('guide-close'),async()=>{$('guide').hidden=true;if(user&&user.mode!=='demo'){await api('/api/account/guide',{method:'POST',body:JSON.stringify({guide_seen:true})});user.profile.guide_seen=true}});
+function onboardScreen(index){
+  onboardStep=index;document.querySelectorAll('[data-onboard-step]').forEach(panel=>{const hidden=Number(panel.dataset.onboardStep)!==index;panel.hidden=hidden;panel.querySelectorAll('input').forEach(input=>input.disabled=hidden||((input.id==='onboard-break-start'||input.id==='onboard-break-end')&&!$('onboard-has-break').checked))});
+  $('onboard-progress').textContent=`Шаг ${index+1} из 3`;$('onboard-progress-bar').style.width=((index+1)/3*100)+'%';
+  $('onboard-back').hidden=index===0;$('onboard-next').hidden=index===2;$('onboard-publish').hidden=index!==2;
+}
+function openOnboarding(){
+  if(!user){authMode('register');$('auth-role').value='master';$('auth-name').focus();return}
+  $('welcome').hidden=true;$('workspace').hidden=true;$('guide').hidden=true;$('onboarding').hidden=false;
+  $('onboard-name').value=user.profile.display_name;
+  if(!$('onboard-weekdays').children.length)weekdayNames.forEach((name,index)=>{const label=document.createElement('label');const input=document.createElement('input');input.type='checkbox';input.value=index;input.checked=index<5;label.append(input,document.createTextNode(name.slice(0,2)));$('onboard-weekdays').append(label)});
+  onboardScreen(0);$('onboarding').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function validateOnboardStep(){
+  const panel=document.querySelector(`[data-onboard-step="${onboardStep}"]`);
+  for(const input of panel.querySelectorAll('input'))if(!input.checkValidity()){input.reportValidity();return false}
+  return true;
+}
+$('onboard-next').onclick=()=>{if(validateOnboardStep())onboardScreen(onboardStep+1)};
+$('onboard-back').onclick=()=>onboardScreen(Math.max(0,onboardStep-1));
+$('onboard-later').onclick=()=>{$('onboarding').hidden=true;$('workspace').hidden=false;showGuide()};
+$('become-master').onclick=openOnboarding;$('empty-setup').onclick=openOnboarding;
+$('onboard-has-break').onchange=()=>{const enabled=$('onboard-has-break').checked;$('onboard-break-start').disabled=!enabled;$('onboard-break-end').disabled=!enabled};
+$('onboard-form').onsubmit=async event=>{
+  event.preventDefault();if(!validateOnboardStep())return;if(onboardStep<2){onboardScreen(onboardStep+1);return}const button=$('onboard-publish');button.disabled=true;notify('');
+  try{
+    const enabled=[...$('onboard-weekdays').querySelectorAll('input:checked')].map(input=>Number(input.value));
+    const windows=$('onboard-has-break').checked?[{start:$('onboard-start').value,end:$('onboard-break-start').value},{start:$('onboard-break-end').value,end:$('onboard-end').value}]:[{start:$('onboard-start').value,end:$('onboard-end').value}];
+    const weekly=Object.fromEntries(weekdayNames.map((_,day)=>[String(day),enabled.includes(day)?windows:[]]));
+    const payload={master:{name:$('onboard-name').value,timezone:$('onboard-timezone').value,step_minutes:15,notice_minutes:60,horizon_days:60,weekly},service:{name:$('onboard-service').value,duration_minutes:Number($('onboard-duration').value),buffer_minutes:Number($('onboard-buffer').value),price:Math.round(Number($('onboard-price').value)*100),active:true}};
+    const result=await api('/api/onboarding/master',{method:'POST',body:JSON.stringify(payload)});selectedMaster=result.id;view='settings';await boot();showGuide();notify('Ваша страница готова. Скопируйте ссылку и пригласите первого клиента.');
+  }catch(error){notify(error.message,true)}finally{button.disabled=false}
+};
+bind($('copy-link'),async()=>{await navigator.clipboard.writeText($('share-link').value);notify('Ссылка для записи скопирована.')});
+bind($('toggle-publication'),async()=>{const item=master();await api('/api/masters/'+encodeURIComponent(item.id)+'/publication',{method:'POST',body:JSON.stringify({revision:item.revision,published:!item.published})});await loadMasters();notify(master().published?'Запись снова открыта клиентам.':'Новые записи приостановлены. Существующие визиты сохранены.')});
+
 boot().catch(error=>notify(error.message,true));
+
