@@ -138,12 +138,12 @@ def owner(request):
 
 @app.get('/', response_class=HTMLResponse)
 def home():
-    return Path(__file__).with_name('index.html').read_text(encoding='utf-8')
+    return HTMLResponse(Path(__file__).with_name('index.html').read_text(encoding='utf-8'),headers={'Cache-Control':'no-store'})
 
 
 @app.get('/calendar.js',include_in_schema=False)
 def calendar_script():
-    return FileResponse(Path(__file__).with_name('calendar.js'),media_type='application/javascript')
+    return FileResponse(Path(__file__).with_name('calendar.js'),media_type='application/javascript',headers={'Cache-Control':'no-cache, max-age=0, must-revalidate'})
 
 
 @app.get('/docs', include_in_schema=False)
