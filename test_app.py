@@ -5,6 +5,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 os.environ['SESSION_SECRET'] = 'test-only-session-secret-at-least-32-characters'
+os.environ['ALLOW_DEMO']='true'
 _initial_database = tempfile.TemporaryDirectory()
 os.environ['DATABASE_PATH'] = os.path.join(_initial_database.name, 'initial.sqlite3')
 import app
