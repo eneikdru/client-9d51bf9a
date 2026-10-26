@@ -4,11 +4,15 @@ import os
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -16,20 +20,49 @@ DB = os.getenv('DATABASE_PATH', 'booking.sqlite3')
 secret = os.getenv('SESSION_SECRET', '')
 if len(secret) < 32:
     raise RuntimeError('Set SESSION_SECRET to at least 32 random characters')
-app = FastAPI(title='Master Booking', version='1.0.0')
+ROOT_PATH = os.getenv('ROOT_PATH', '').rstrip('/')
+PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
+app = FastAPI(title='Master Booking', version='1.1.0', root_path=ROOT_PATH, docs_url=None, redoc_url=None)
+
+
+class SlotOutput(BaseModel):
+    id: str
+    master: str
+    service: str
+    start: int
+    end: int
+    price: int = Field(ge=0)
+
+
+class BookingOutput(BaseModel):
+    id: str
+    owner: str
+    slot: str
+    status: Literal['confirmed', 'cancelled']
+    idem: str
+    appointment: SlotOutput | None = None
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def storage_failure(request: Request, exc):
+    return JSONResponse(status_code=503, content={'detail': 'Storage temporarily unavailable'}, headers={'Retry-After': '1'})
 app.add_middleware(SessionMiddleware, secret_key=secret, https_only=os.getenv('COOKIE_SECURE', 'true') == 'true', same_site='lax')
 oauth = OAuth()
-for name, url in [('google', 'https://accounts.google.com/.well-known/openid-configuration'), ('facebook', 'https://www.facebook.com/.well-known/openid-configuration/')]:
-    oauth.register(name, client_id=os.getenv(name.upper() + '_CLIENT_ID'), client_secret=os.getenv(name.upper() + '_CLIENT_SECRET'), server_metadata_url=url, client_kwargs={'scope': 'openid email profile'})
+oauth.register('google', client_id=os.getenv('GOOGLE_CLIENT_ID'), client_secret=os.getenv('GOOGLE_CLIENT_SECRET'), server_metadata_url='https://accounts.google.com/.well-known/openid-configuration', client_kwargs={'scope': 'openid email profile'})
 facebook_version = os.getenv('FACEBOOK_GRAPH_VERSION', '')
 oauth.register('facebook', overwrite=True, client_id=os.getenv('FACEBOOK_CLIENT_ID'), client_secret=os.getenv('FACEBOOK_CLIENT_SECRET'), authorize_url=f'https://www.facebook.com/{facebook_version}/dialog/oauth', access_token_url=f'https://graph.facebook.com/{facebook_version}/oauth/access_token', api_base_url=f'https://graph.facebook.com/{facebook_version}/', client_kwargs={'scope': 'public_profile', 'token_endpoint_auth_method': 'client_secret_post'})
 
 
+@contextmanager
 def connection():
     db = sqlite3.connect(DB, timeout=10)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA foreign_keys=ON')
-    return db
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
 def initialize():
@@ -45,9 +78,48 @@ def initialize():
 initialize()
 
 
+def seed_demo():
+    """Only reserved demo IDs are generated; real availability is never synthesized."""
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    with connection() as db:
+        for number, (master, service, price) in enumerate([
+            ('Анна · демо', 'Стрижка', 5000),
+            ('Нино · демо', 'Маникюр', 7000),
+            ('Георгий · демо', 'Массаж', 9000),
+        ]):
+            for hour in (0, 2, 4):
+                start = int((day + timedelta(hours=hour)).timestamp())
+                db.execute('INSERT OR IGNORE INTO slots VALUES(?,?,?,?,?,?)',
+                           (f'demo:{start}:{number}', f'demo:{master}', service, start, start + 3600, price))
+
+
+seed_demo()
+
+
+def check_csrf(request):
+    expected = request.session.get('csrf')
+    supplied = request.headers.get('x-csrf-token', '')
+    if not expected or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(403, 'Invalid CSRF token')
+
+
+def provider_ready(provider):
+    return bool(os.getenv(provider.upper() + '_CLIENT_ID') and os.getenv(provider.upper() + '_CLIENT_SECRET')
+                and (provider != 'facebook' or facebook_version))
+
+
+def public_url(request, route):
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL + '/' + route.lstrip('/')
+    root = request.scope.get('root_path', '').rstrip('/')
+    return str(request.base_url).rstrip('/') + '/' + route.lstrip('/') if not root else str(request.url.replace(path=root + '/' + route.lstrip('/'), query=''))
+
+
 def owner(request):
     authorization = request.headers.get('authorization', '')
-    if authorization.startswith('Bearer '):
+    if authorization:
+        if not authorization.startswith('Bearer '):
+            raise HTTPException(401, 'Invalid authorization scheme')
         digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
         with connection() as db:
             row = db.execute('SELECT owner FROM tokens WHERE hash=? AND expires>?', (digest, int(time.time()))).fetchone()
@@ -57,8 +129,8 @@ def owner(request):
     user = request.session.get('user')
     if not user:
         raise HTTPException(401, 'Sign in required')
-    if request.method not in ('GET', 'HEAD') and not secrets.compare_digest(request.headers.get('x-csrf-token', ''), request.session.get('csrf', 'missing')):
-        raise HTTPException(403, 'Invalid CSRF token')
+    if request.method not in ('GET', 'HEAD'):
+        check_csrf(request)
     return user
 
 
@@ -67,14 +139,51 @@ def home():
     return Path(__file__).with_name('index.html').read_text(encoding='utf-8')
 
 
+@app.get('/docs', include_in_schema=False)
+def docs():
+    response = get_swagger_ui_html(openapi_url='./openapi.json', title='Booking API')
+    # A proxy may strip the mount without passing ASGI root_path. Resolve local
+    # Try-it-out calls from the visible docs URL, just as the booking UI does.
+    interceptor = """requestInterceptor: (req) => {
+      const target = new URL(req.url, location.href);
+      const base = new URL('./', location.href);
+      if (target.origin === base.origin && !target.pathname.startsWith(base.pathname)) {
+        target.pathname = base.pathname + target.pathname.replace(/^\\//, '');
+        req.url = target.href;
+      }
+      return req;
+    },"""
+    html = response.body.decode().replace('const ui = SwaggerUIBundle({', 'const ui = SwaggerUIBundle({' + interceptor)
+    return HTMLResponse(html)
+
+
+@app.get('/api/config')
+def config(request: Request):
+    request.session.setdefault('csrf', secrets.token_urlsafe(32))
+    return {'providers': {name: provider_ready(name) for name in ('google', 'facebook')},
+            'csrf': request.session['csrf'], 'demo_available': True}
+
+
+@app.post('/api/demo-session')
+def demo_session(request: Request):
+    check_csrf(request)
+    current = request.session.get('user', '')
+    if current and not current.startswith('demo:'):
+        raise HTTPException(409, 'Sign out before entering demo mode')
+    if not current:
+        request.session.update(user='demo:' + secrets.token_urlsafe(24), csrf=secrets.token_urlsafe(32))
+    seed_demo()
+    return {'mode': 'demo', 'csrf': request.session['csrf']}
+
+
 @app.get('/auth/{provider}')
 async def login(provider: str, request: Request):
     if provider not in ('google', 'facebook'):
         raise HTTPException(404, 'Unknown provider')
     client = oauth.create_client(provider)
-    if not client.client_id or (provider == 'facebook' and not facebook_version):
-        raise HTTPException(503, 'Login provider is not configured')
-    return await client.authorize_redirect(request, str(request.url_for('callback', provider=provider)))
+    if not provider_ready(provider):
+        return RedirectResponse('../?notice=provider_unavailable', status_code=303)
+    return await client.authorize_redirect(request, public_url(request, f'auth/{provider}/callback'))
 
 
 @app.get('/auth/{provider}/callback', name='callback')
@@ -96,17 +205,20 @@ async def callback(provider: str, request: Request):
         raise HTTPException(401, 'Authentication failed') from None
     request.session.clear()
     request.session.update(user=provider + ':' + user['sub'], csrf=secrets.token_urlsafe(32))
-    return RedirectResponse('/')
+    return RedirectResponse('../../', status_code=303)
 
 
 @app.get('/api/me')
 def me(request: Request):
-    return {'id': owner(request), 'csrf': request.session.get('csrf')}
+    user = owner(request)
+    return {'id': user, 'csrf': request.session.get('csrf'), 'mode': 'demo' if user.startswith('demo:') else 'live'}
 
 
 @app.post('/api/logout')
 def logout(request: Request):
-    owner(request)
+    user = owner(request)
+    with connection() as db:
+        db.execute('DELETE FROM tokens WHERE owner=?', (user,))
     request.session.clear()
     return {'ok': True}
 
@@ -114,16 +226,22 @@ def logout(request: Request):
 @app.post('/api/agent-token')
 def agent_token(request: Request):
     user = owner(request)
+    if request.headers.get('authorization'):
+        raise HTTPException(403, 'Use a browser session to issue an agent token')
     token = secrets.token_urlsafe(48)
     with connection() as db:
         db.execute('INSERT INTO tokens VALUES(?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), user, int(time.time()) + 3600))
     return {'access_token': token, 'token_type': 'Bearer', 'expires_in': 3600}
 
 
-@app.get('/api/slots')
-def slots():
+@app.get('/api/slots', response_model=list[SlotOutput])
+def slots(request: Request):
+    user = owner(request) if request.session.get('user') or request.headers.get('authorization') else ''
+    demo = user.startswith('demo:')
+    if demo:
+        seed_demo()
     with connection() as db:
-        return [dict(r) for r in db.execute("SELECT s.* FROM slots s WHERE start>? AND NOT EXISTS (SELECT 1 FROM bookings b JOIN slots busy ON busy.id=b.slot WHERE b.status='confirmed' AND busy.master=s.master AND busy.start<s.end AND busy.end>s.start) ORDER BY start", (int(time.time()),))]
+        return [dict(r) for r in db.execute("SELECT s.* FROM slots s WHERE start>? AND (s.id LIKE 'demo:%')=? AND NOT EXISTS (SELECT 1 FROM bookings b JOIN slots busy ON busy.id=b.slot WHERE b.status='confirmed' AND busy.master=s.master AND busy.start<s.end AND busy.end>s.start) ORDER BY start, id", (int(time.time()), demo))]
 
 
 class BookingInput(BaseModel):
@@ -131,7 +249,7 @@ class BookingInput(BaseModel):
     slot_id: str = Field(min_length=1, max_length=100)
 
 
-@app.post('/api/bookings', status_code=201)
+@app.post('/api/bookings', status_code=201, response_model=BookingOutput)
 def book(data: BookingInput, request: Request):
     user = owner(request)
     key = request.headers.get('idempotency-key', '')
@@ -147,6 +265,8 @@ def book(data: BookingInput, request: Request):
         slot = db.execute('SELECT * FROM slots WHERE id=?', (data.slot_id,)).fetchone()
         if not slot:
             raise HTTPException(404, 'Slot not found')
+        if user.startswith('demo:') != slot['id'].startswith('demo:'):
+            raise HTTPException(404, 'Slot not found')
         if slot['start'] <= int(time.time()):
             raise HTTPException(409, 'Slot is in the past')
         conflict = db.execute("SELECT 1 FROM bookings b JOIN slots s ON s.id=b.slot WHERE b.status='confirmed' AND s.master=? AND s.start<? AND s.end>?", (slot['master'], slot['end'], slot['start'])).fetchone()
@@ -157,19 +277,23 @@ def book(data: BookingInput, request: Request):
         return dict(db.execute('SELECT * FROM bookings WHERE id=?', (booking_id,)).fetchone())
 
 
-@app.get('/api/bookings')
+@app.get('/api/bookings', response_model=list[BookingOutput])
 def bookings(request: Request):
     user = owner(request)
     with connection() as db:
-        return [dict(r) for r in db.execute('SELECT * FROM bookings WHERE owner=?', (user,))]
+        rows = db.execute('SELECT b.*,s.master,s.service,s.start,s.end,s.price FROM bookings b JOIN slots s ON s.id=b.slot WHERE b.owner=? ORDER BY s.start,b.id', (user,))
+        return [{**dict(r), 'appointment': {'id': r['slot'], **{key:r[key] for key in ('master','service','start','end','price')}}} for r in rows]
 
 
 @app.post('/api/bookings/{booking_id}/cancel')
 def cancel(booking_id: str, request: Request):
     user = owner(request)
     with connection() as db:
-        row = db.execute('SELECT * FROM bookings WHERE id=? AND owner=?', (booking_id, user)).fetchone()
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT b.*,s.start FROM bookings b JOIN slots s ON s.id=b.slot WHERE b.id=? AND b.owner=?', (booking_id, user)).fetchone()
         if not row:
             raise HTTPException(404, 'Booking not found')
+        if row['status'] == 'confirmed' and row['start'] <= int(time.time()):
+            raise HTTPException(409, 'Started or completed appointments cannot be cancelled')
         db.execute("UPDATE bookings SET status='cancelled' WHERE id=?", (booking_id,))
     return {'id': booking_id, 'status': 'cancelled'}
