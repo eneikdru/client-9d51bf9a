@@ -11,10 +11,11 @@ from typing import Literal
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.sessions import SessionMiddleware
+import scheduling
 
 DB = os.getenv('DATABASE_PATH', 'booking.sqlite3')
 secret = os.getenv('SESSION_SECRET', '')
@@ -73,6 +74,7 @@ def initialize():
         CREATE UNIQUE INDEX IF NOT EXISTS active_slot ON bookings(slot) WHERE status='confirmed';
         CREATE TABLE IF NOT EXISTS tokens(hash TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL);
         ''')
+        scheduling.initialize(db)
 
 
 initialize()
@@ -137,6 +139,11 @@ def owner(request):
 @app.get('/', response_class=HTMLResponse)
 def home():
     return Path(__file__).with_name('index.html').read_text(encoding='utf-8')
+
+
+@app.get('/calendar.js',include_in_schema=False)
+def calendar_script():
+    return FileResponse(Path(__file__).with_name('calendar.js'),media_type='application/javascript')
 
 
 @app.get('/docs', include_in_schema=False)
@@ -241,7 +248,7 @@ def slots(request: Request):
     if demo:
         seed_demo()
     with connection() as db:
-        return [dict(r) for r in db.execute("SELECT s.* FROM slots s WHERE start>? AND (s.id LIKE 'demo:%')=? AND NOT EXISTS (SELECT 1 FROM bookings b JOIN slots busy ON busy.id=b.slot WHERE b.status='confirmed' AND busy.master=s.master AND busy.start<s.end AND busy.end>s.start) ORDER BY start, id", (int(time.time()), demo))]
+        return [dict(r) for r in db.execute("SELECT s.* FROM slots s WHERE start>? AND (s.id LIKE 'demo:%')=? AND NOT EXISTS (SELECT 1 FROM calendar_slots c WHERE c.slot_id=s.id) AND NOT EXISTS (SELECT 1 FROM bookings b JOIN slots busy ON busy.id=b.slot WHERE b.status='confirmed' AND busy.master=s.master AND busy.start<s.end AND busy.end>s.start) ORDER BY start, id", (int(time.time()), demo))]
 
 
 class BookingInput(BaseModel):
@@ -267,6 +274,7 @@ def book(data: BookingInput, request: Request):
             raise HTTPException(404, 'Slot not found')
         if user.startswith('demo:') != slot['id'].startswith('demo:'):
             raise HTTPException(404, 'Slot not found')
+        scheduling.validate_calendar_slot(db,slot,user)
         if slot['start'] <= int(time.time()):
             raise HTTPException(409, 'Slot is in the past')
         conflict = db.execute("SELECT 1 FROM bookings b JOIN slots s ON s.id=b.slot WHERE b.status='confirmed' AND s.master=? AND s.start<? AND s.end>?", (slot['master'], slot['end'], slot['start'])).fetchone()
@@ -281,7 +289,7 @@ def book(data: BookingInput, request: Request):
 def bookings(request: Request):
     user = owner(request)
     with connection() as db:
-        rows = db.execute('SELECT b.*,s.master,s.service,s.start,s.end,s.price FROM bookings b JOIN slots s ON s.id=b.slot WHERE b.owner=? ORDER BY s.start,b.id', (user,))
+        rows = db.execute('SELECT b.*,COALESCE(m.name,s.master) AS master,s.service,s.start,s.end,s.price FROM bookings b JOIN slots s ON s.id=b.slot LEFT JOIN masters m ON m.id=s.master WHERE b.owner=? ORDER BY s.start,b.id', (user,))
         return [{**dict(r), 'appointment': {'id': r['slot'], **{key:r[key] for key in ('master','service','start','end','price')}}} for r in rows]
 
 
@@ -297,3 +305,6 @@ def cancel(booking_id: str, request: Request):
             raise HTTPException(409, 'Started or completed appointments cannot be cancelled')
         db.execute("UPDATE bookings SET status='cancelled' WHERE id=?", (booking_id,))
     return {'id': booking_id, 'status': 'cancelled'}
+
+
+app.include_router(scheduling.router(connection,owner))
