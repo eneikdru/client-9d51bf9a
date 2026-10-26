@@ -16,14 +16,16 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.sessions import SessionMiddleware
 import scheduling
+import accounts
+import storage
+from fastapi.exceptions import RequestValidationError
 
-DB = os.getenv('DATABASE_PATH', 'booking.sqlite3')
-secret = os.getenv('SESSION_SECRET', '')
-if len(secret) < 32:
-    raise RuntimeError('Set SESSION_SECRET to at least 32 random characters')
+DB = storage.database_path()
+secret = storage.session_secret()
+ALLOW_DEMO=os.getenv('ALLOW_DEMO','false').lower()=='true'
 ROOT_PATH = os.getenv('ROOT_PATH', '').rstrip('/')
 PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
-app = FastAPI(title='Master Booking', version='1.1.0', root_path=ROOT_PATH, docs_url=None, redoc_url=None)
+app = FastAPI(title='Время · Booking', version='2.0.0', root_path=ROOT_PATH, docs_url=None, redoc_url=None)
 
 
 class SlotOutput(BaseModel):
@@ -47,7 +49,23 @@ class BookingOutput(BaseModel):
 @app.exception_handler(sqlite3.OperationalError)
 async def storage_failure(request: Request, exc):
     return JSONResponse(status_code=503, content={'detail': 'Storage temporarily unavailable'}, headers={'Retry-After': '1'})
-app.add_middleware(SessionMiddleware, secret_key=secret, https_only=os.getenv('COOKIE_SECURE', 'true') == 'true', same_site='lax')
+
+@app.exception_handler(RequestValidationError)
+async def validation_failure(request:Request,exc):
+    # Never echo a password or recovery code in validation responses.
+    return JSONResponse(status_code=422,content={'detail':[{key:error[key] for key in ('loc','msg','type')} for error in exc.errors()]})
+
+app.add_middleware(SessionMiddleware, secret_key=secret, https_only=os.getenv('COOKIE_SECURE', 'true') == 'true', same_site='lax',max_age=7*86400)
+
+
+@app.middleware('http')
+async def response_headers(request:Request,call_next):
+    response=await call_next(request)
+    response.headers['X-Content-Type-Options']='nosniff'
+    response.headers['Referrer-Policy']='same-origin'
+    if request.scope.get('path','').startswith('/api/') or request.url.path.startswith(request.scope.get('root_path','')+'/api/'):
+        response.headers['Cache-Control']='no-store'
+    return response
 oauth = OAuth()
 oauth.register('google', client_id=os.getenv('GOOGLE_CLIENT_ID'), client_secret=os.getenv('GOOGLE_CLIENT_SECRET'), server_metadata_url='https://accounts.google.com/.well-known/openid-configuration', client_kwargs={'scope': 'openid email profile'})
 facebook_version = os.getenv('FACEBOOK_GRAPH_VERSION', '')
@@ -75,6 +93,7 @@ def initialize():
         CREATE TABLE IF NOT EXISTS tokens(hash TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL);
         ''')
         scheduling.initialize(db)
+        accounts.initialize(db)
 
 
 initialize()
@@ -95,7 +114,8 @@ def seed_demo():
                            (f'demo:{start}:{number}', f'demo:{master}', service, start, start + 3600, price))
 
 
-seed_demo()
+if ALLOW_DEMO:
+    seed_demo()
 
 
 def check_csrf(request):
@@ -131,6 +151,11 @@ def owner(request):
     user = request.session.get('user')
     if not user:
         raise HTTPException(401, 'Sign in required')
+    if user.startswith('demo:') and not ALLOW_DEMO:
+        request.session.clear()
+        raise HTTPException(401,'Sign in required')
+    with connection() as db:
+        accounts.check_session(db,request,user)
     if request.method not in ('GET', 'HEAD'):
         check_csrf(request)
     return user
@@ -144,6 +169,11 @@ def home():
 @app.get('/calendar.js',include_in_schema=False)
 def calendar_script():
     return FileResponse(Path(__file__).with_name('calendar.js'),media_type='application/javascript',headers={'Cache-Control':'no-cache, max-age=0, must-revalidate'})
+
+
+@app.get('/app.css',include_in_schema=False)
+def stylesheet():
+    return FileResponse(Path(__file__).with_name('app.css'),media_type='text/css',headers={'Cache-Control':'no-cache, max-age=0, must-revalidate'})
 
 
 @app.get('/docs', include_in_schema=False)
@@ -168,11 +198,20 @@ def docs():
 def config(request: Request):
     request.session.setdefault('csrf', secrets.token_urlsafe(32))
     return {'providers': {name: provider_ready(name) for name in ('google', 'facebook')},
-            'csrf': request.session['csrf'], 'demo_available': True}
+            'csrf': request.session['csrf'], 'demo_available': ALLOW_DEMO,'local_auth':True,'mode':'live'}
+
+
+@app.get('/api/status')
+def status():
+    with connection() as db:
+        installation=db.execute("SELECT value FROM runtime_metadata WHERE key='installation_id'").fetchone()['value']
+    return {'status':'ok','version':'2.0.0','mode':'live','installation_id':installation}
 
 
 @app.post('/api/demo-session')
 def demo_session(request: Request):
+    if not ALLOW_DEMO:
+        raise HTTPException(404,'Demo mode is disabled')
     check_csrf(request)
     current = request.session.get('user', '')
     if current and not current.startswith('demo:'):
@@ -210,15 +249,17 @@ async def callback(provider: str, request: Request):
             raise ValueError('Missing verified identity')
     except Exception:
         raise HTTPException(401, 'Authentication failed') from None
-    request.session.clear()
-    request.session.update(user=provider + ':' + user['sub'], csrf=secrets.token_urlsafe(32))
+    with connection() as db:
+        accounts.start_session(db,request,provider + ':' + user['sub'])
     return RedirectResponse('../../', status_code=303)
 
 
 @app.get('/api/me')
 def me(request: Request):
     user = owner(request)
-    return {'id': user, 'csrf': request.session.get('csrf'), 'mode': 'demo' if user.startswith('demo:') else 'live'}
+    with connection() as db:
+        details=accounts.profile(db,user)
+    return {'id': user, 'csrf': request.session.get('csrf'), 'mode': 'demo' if user.startswith('demo:') else 'live','profile':details}
 
 
 @app.post('/api/logout')
@@ -226,6 +267,9 @@ def logout(request: Request):
     user = owner(request)
     with connection() as db:
         db.execute('DELETE FROM tokens WHERE owner=?', (user,))
+        sid=request.session.get('sid')
+        if sid:
+            db.execute('DELETE FROM login_sessions WHERE hash=?',(accounts.digest(sid),))
     request.session.clear()
     return {'ok': True}
 
@@ -308,3 +352,4 @@ def cancel(booking_id: str, request: Request):
 
 
 app.include_router(scheduling.router(connection,owner))
+app.include_router(accounts.router(connection,owner,check_csrf))
