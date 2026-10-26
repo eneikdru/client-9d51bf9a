@@ -1,11 +1,73 @@
-<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Запись к мастеру</title>
-<style>[hidden]{display:none!important}body{font:17px system-ui;background:#f6f3ec;color:#183b36;max-width:900px;margin:60px auto;padding:24px}h1{font-size:48px}button,a{display:inline-block;background:#183b36;color:white;padding:12px 20px;border:0;border-radius:8px;margin:6px;text-decoration:none;cursor:pointer}article{background:white;padding:20px;margin:15px 0;border-radius:12px}#message{white-space:pre-wrap}</style>
-<p>МАСТЕРА · ОНЛАЙН-ЗАПИСЬ</p><h1>Ваше время.<br>Ваш мастер.</h1><p>Выберите свободное время и подтвердите запись.</p>
-<nav><a href="auth/google">Войти через Google</a><a href="auth/facebook">Войти через Facebook</a><button id="logout" hidden>Выйти</button></nav><p id="message" role="status"></p><h2>Свободное время</h2><main id="slots"></main><h2>Мои записи</h2><section id="bookings"></section><a href="openapi.json">API для агента</a>
-<script>
-let csrf='';const message=document.querySelector('#message');
-async function api(path,options={}){const r=await fetch(new URL(path.replace(/^\//, ''), document.baseURI),{...options,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...options.headers}});const text=await r.text();let data;try{data=JSON.parse(text)}catch{throw Error('Сервис временно недоступен. Повторите позже.')} if(!r.ok)throw Error(data.detail||'Ошибка запроса');return data}
-function card(parent,text,label,action){const row=document.createElement('article');row.textContent=text;if(label){const button=document.createElement('button');button.textContent=label;button.onclick=async()=>{button.disabled=true;try{await action();await load()}catch(e){message.textContent=e.message;button.disabled=false}};row.append(button)}parent.append(row)}
-async function load(){const s=document.querySelector('#slots'),b=document.querySelector('#bookings');s.replaceChildren();b.replaceChildren();let signed=false;try{const me=await api('/api/me');csrf=me.csrf;signed=true;document.querySelector('#logout').hidden=false}catch{}const slots=await api('/api/slots');if(!slots.length)s.textContent='Свободных окон пока нет.';for(const slot of slots){const key=crypto.randomUUID();card(s,`${slot.master} · ${slot.service} · ${new Date(slot.start*1000).toLocaleString()} · ${(slot.price/100).toFixed(2)} GEL`,signed?'Записаться':null,()=>api('/api/bookings',{method:'POST',headers:{'Idempotency-Key':key},body:JSON.stringify({slot_id:slot.id})}))}if(signed)for(const item of await api('/api/bookings'))card(b,`${item.slot} · ${item.status}`,item.status==='confirmed'?'Отменить':null,()=>api(`/api/bookings/${encodeURIComponent(item.id)}/cancel`,{method:'POST'}))}
-document.querySelector('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload()};load().catch(e=>message.textContent=e.message);
-</script></html>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Запись к мастеру</title>
+  <style>
+    [hidden]{display:none!important}*{box-sizing:border-box}body{font:16px system-ui;background:#f6f3ec;color:#183b36;max-width:960px;margin:40px auto;padding:24px}h1{font-size:clamp(36px,7vw,60px);line-height:1.1}button,.login{display:inline-block;background:#183b36;color:white;padding:12px 20px;border:0;border-radius:8px;margin:6px 6px 6px 0;text-decoration:none;cursor:pointer;font:inherit}button:disabled{opacity:.5;cursor:default}article{background:white;padding:22px;margin:15px 0;border-radius:12px;border:1px solid #dce2dc}article p{margin:8px 0}.muted{color:#596b65}#message{white-space:pre-wrap}#mode{background:#e4ece4;padding:14px;border-radius:8px}a{color:#183b36}nav{margin:24px 0}footer{border-top:1px solid #cdd7cc;margin-top:40px;padding-top:20px}#slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}#slots article{margin:0}button:focus-visible,a:focus-visible{outline:3px solid #d98535;outline-offset:3px}
+  </style>
+</head>
+<body>
+  <p class="muted">МАСТЕРА · ОНЛАЙН-ЗАПИСЬ</p>
+  <h1>Ваше время.<br>Ваш мастер.</h1>
+  <p>Выберите услугу и время. Записи можно просмотреть и отменить здесь же.</p>
+  <p id="mode">Проверяем доступные способы входа…</p>
+  <nav aria-label="Вход">
+    <button id="google" hidden>Войти через Google</button>
+    <button id="facebook" hidden>Войти через Facebook</button>
+    <button id="demo" hidden>Попробовать демозапись</button>
+    <button id="logout" hidden>Выйти</button>
+  </nav>
+  <p id="message" role="status" aria-live="polite"></p>
+  <button id="retry" hidden>Обновить данные</button>
+  <h2>Свободное время</h2>
+  <main id="slots" aria-live="polite">Загружаем расписание…</main>
+  <section id="mine" hidden><h2>Мои записи</h2><div id="bookings"></div></section>
+  <footer><a href="docs">Документация API</a> · <a href="openapi.json">Схема OpenAPI</a>
+    <p class="muted">Подключение к Meta AI требует отдельной настройки аккаунта и доступа к Meta AI Connectors.</p>
+  </footer>
+  <script>
+    let csrf='', current=null, settings=null;
+    const $=id=>document.getElementById(id), message=$('message');
+    const explanations={
+      'Sign in required':'Сначала войдите или откройте деморежим.',
+      'Time is already booked':'Это время уже занято. Выберите другое окно.',
+      'Slot is in the past':'Это время уже прошло. Обновите расписание.',
+      'Invalid CSRF token':'Сессия устарела. Обновите страницу.',
+      'Started or completed appointments cannot be cancelled':'Встреча уже началась или завершилась — отмена недоступна.'
+    };
+    async function api(path,options={}){
+      const r=await fetch(new URL(path.replace(/^\//,''),document.baseURI),{...options,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...options.headers}});
+      let data;try{data=await r.json()}catch{throw Error('Сервис временно недоступен. Попробуйте обновить данные.')}
+      if(!r.ok){const e=Error(explanations[data.detail]||(typeof data.detail==='string'?data.detail:'Проверьте введённые данные.'));e.status=r.status;throw e}
+      return data;
+    }
+    function action(button,run){button.onclick=async()=>{button.disabled=true;message.textContent='';try{await run()}catch(e){message.textContent=e.message;$('retry').hidden=false}finally{button.disabled=false}}}
+    function appointment(parent,slot){
+      const row=document.createElement('article');
+      const title=document.createElement('strong');title.textContent=slot.service+' · '+slot.master.replace(/^demo:/,'');row.append(title);
+      const when=document.createElement('p');when.textContent=new Date(slot.start*1000).toLocaleString('ru-RU',{dateStyle:'medium',timeStyle:'short'})+' · '+Intl.DateTimeFormat().resolvedOptions().timeZone;row.append(when);
+      const price=document.createElement('p');price.textContent=new Intl.NumberFormat('ru-RU',{style:'currency',currency:'GEL'}).format(slot.price/100);row.append(price);parent.append(row);return row;
+    }
+    async function load(){
+      settings=await api('/api/config');csrf=settings.csrf;current=null;
+      try{current=await api('/api/me');csrf=current.csrf}catch(e){if(e.status!==401)throw e}
+      $('google').hidden=!!current||!settings.providers.google;$('facebook').hidden=!!current||!settings.providers.facebook;
+      $('demo').hidden=!!current;$('logout').hidden=!current;$('mine').hidden=!current;
+      $('mode').textContent=current?.mode==='demo'?'ДЕМОРЕЖИМ. Все мастера и записи вымышленные. Вы проверяете работу сервиса.':current?'Вы вошли. Можно создавать и отменять свои записи.':(!settings.providers.google&&!settings.providers.facebook?'Вход через Google и Facebook пока не настроен. Полный сценарий можно проверить в деморежиме.':'Войдите для записи к мастеру или попробуйте деморежим.');
+      const slots=await api('/api/slots');$('slots').replaceChildren();
+      if(!slots.length)$('slots').textContent=current?.mode==='demo'?'Все демонстрационные окна заняты. Попробуйте позже.':'Свободных окон пока нет. В деморежиме доступно тестовое расписание.';
+      for(const slot of slots){const row=appointment($('slots'),slot);if(current){const button=document.createElement('button');button.textContent='Записаться';row.append(button);const key=crypto.randomUUID();action(button,async()=>{const booking=await api('/api/bookings',{method:'POST',headers:{'Idempotency-Key':key},body:JSON.stringify({slot_id:slot.id})});await load();message.textContent=booking.status==='confirmed'?'Запись подтверждена. Она появилась в разделе «Мои записи».':'Эта запись уже отменена. Выберите время заново.'})}}
+      $('bookings').replaceChildren();
+      if(current){const bookings=await api('/api/bookings');if(!bookings.length)$('bookings').textContent='У вас пока нет записей.';for(const item of bookings){const row=item.appointment?appointment($('bookings'),item.appointment):document.createElement('article');const label=document.createElement('p');label.textContent=item.status==='confirmed'?'Подтверждена':'Отменена';if(!item.appointment)$('bookings').append(row);row.append(label);if(item.status==='confirmed'&&(!item.appointment||item.appointment.start*1000>Date.now())){const button=document.createElement('button');button.textContent='Отменить запись';row.append(button);action(button,async()=>{await api('/api/bookings/'+encodeURIComponent(item.id)+'/cancel',{method:'POST'});await load();message.textContent='Запись отменена. Время снова свободно.'})}}}
+      $('retry').hidden=true;
+    }
+    for(const provider of ['google','facebook'])$(provider).onclick=()=>{location.href=new URL('auth/'+provider,document.baseURI).href};
+    action($('demo'),async()=>{await api('/api/demo-session',{method:'POST'});await load()});
+    action($('logout'),async()=>{await api('/api/logout',{method:'POST'});await load();message.textContent='Вы вышли.'});
+    action($('retry'),load);
+    load().then(()=>{if(new URLSearchParams(location.search).has('notice'))message.textContent='Этот способ входа пока не настроен. Используйте деморежим.'}).catch(e=>{message.textContent=e.message;$('retry').hidden=false});
+  </script>
+</body>
+</html>
