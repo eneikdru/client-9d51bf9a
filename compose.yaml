@@ -1,0 +1,16 @@
+services:
+  booking:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - booking-data:/data
+    environment:
+      BOOKING_DATA_DIR: /data
+      ALLOW_DEMO: "false"
+      COOKIE_SECURE: "true"
+      ROOT_PATH: ${ROOT_PATH:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+volumes:
+  booking-data:
