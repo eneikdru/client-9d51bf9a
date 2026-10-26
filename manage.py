@@ -10,5 +10,7 @@ parser.add_argument('start', type=int)
 parser.add_argument('end', type=int)
 parser.add_argument('price', type=int, help='GEL minor units')
 args = parser.parse_args()
+if args.id.startswith('demo:') or args.master.startswith('demo:'):
+    parser.error('The demo: namespace is reserved for synthetic availability')
 with connection() as db:
     db.execute('INSERT INTO slots VALUES(?,?,?,?,?,?)', (args.id, args.master, args.service, args.start, args.end, args.price))
