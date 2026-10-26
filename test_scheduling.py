@@ -242,3 +242,20 @@ def test_create_and_disable_service(client,workspace):
     assert client.put(path+'/'+service['id'],headers=headers(client),json=service_payload(service,active=False)).status_code==200
     assert book(client,slot).status_code==409
     assert any(s['id']==service['id'] and not s['active'] for s in client.get('/api/masters').json()[0]['services'])
+
+
+def test_post_update_aliases_for_method_limited_proxy(client,workspace):
+    master,day=workspace
+    path=f'/api/masters/{master["id"]}'
+    result=client.post(path,headers=headers(client),json=master_payload(master,name='Через прокси'))
+    assert result.status_code==200
+    master=result.json()
+    result=client.post(path+'/days',headers=headers(client),json={'revision':master['revision'],'days':[day],'windows':[]})
+    assert result.status_code==200
+    assert available(client,master,day)==[]
+    master=result.json()
+    result=client.post(path+'/days/'+day,headers=headers(client),json={'revision':master['revision'],'windows':[{'start':'10:00','end':'19:00'}]})
+    assert result.status_code==200
+    service=master['services'][0]
+    assert client.post(path+'/services/'+service['id'],headers=headers(client),json=service_payload(service,price=1111)).status_code==200
+    assert client.post(path,headers=headers(client),json=master_payload(master)).status_code==409
