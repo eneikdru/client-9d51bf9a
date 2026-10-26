@@ -259,3 +259,11 @@ def test_post_update_aliases_for_method_limited_proxy(client,workspace):
     service=master['services'][0]
     assert client.post(path+'/services/'+service['id'],headers=headers(client),json=service_payload(service,price=1111)).status_code==200
     assert client.post(path,headers=headers(client),json=master_payload(master)).status_code==409
+
+
+def test_calendar_asset_has_revision_and_revalidation(client):
+    assert 'calendar.js?v=' in client.get('/').text
+    assert client.get('/').headers['cache-control']=='no-store'
+    response=client.get('/calendar.js?v=test')
+    assert response.status_code==200
+    assert 'no-cache' in response.headers['cache-control']
