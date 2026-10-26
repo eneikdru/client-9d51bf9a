@@ -269,6 +269,7 @@ def router(connection, owner):
             return serialize_master(db,master_for(db,master_id,user),user)
 
     @routes.put('/masters/{master_id}')
+    @routes.post('/masters/{master_id}')
     def update_master(master_id:str,data:MasterUpdate,request:Request):
         user=edit_owner(request)
         with connection() as db:
@@ -282,6 +283,7 @@ def router(connection, owner):
             return serialize_master(db,current,user)
 
     @routes.put('/masters/{master_id}/days/{day}')
+    @routes.post('/masters/{master_id}/days/{day}')
     def update_day(master_id:str,day:date,data:DayUpdate,request:Request):
         user=edit_owner(request)
         with connection() as db:
@@ -308,6 +310,7 @@ def router(connection, owner):
             return serialize_master(db,master_for(db,master_id,user),user)
 
     @routes.put('/masters/{master_id}/days')
+    @routes.post('/masters/{master_id}/days')
     def update_days(master_id:str,data:DaysUpdate,request:Request):
         user=edit_owner(request)
         with connection() as db:
@@ -332,6 +335,7 @@ def router(connection, owner):
             return dict(db.execute('SELECT * FROM services WHERE id=?',(ident,)).fetchone())
 
     @routes.put('/masters/{master_id}/services/{service_id}')
+    @routes.post('/masters/{master_id}/services/{service_id}')
     def update_service(master_id:str,service_id:str,data:ServiceUpdate,request:Request):
         user=edit_owner(request)
         with connection() as db:
