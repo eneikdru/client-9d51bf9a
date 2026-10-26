@@ -117,6 +117,12 @@ class DaysUpdate(DayUpdate):
         return value
 
 
+class Publication(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    revision:int=Field(ge=1,strict=True)
+    published:bool
+
+
 def initialize(db):
     db.executescript('''
     CREATE TABLE IF NOT EXISTS masters(
@@ -137,6 +143,7 @@ def initialize(db):
       service_id TEXT NOT NULL REFERENCES services(id), master_revision INTEGER NOT NULL,
       service_revision INTEGER NOT NULL, day TEXT NOT NULL, appointment_end INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS master_calendar_slots ON calendar_slots(master_id, day);
+    CREATE TABLE IF NOT EXISTS master_publication(master_id TEXT PRIMARY KEY REFERENCES masters(id), published INTEGER NOT NULL CHECK(published IN (0,1)));
     ''')
 
 
@@ -170,6 +177,10 @@ def master_for(db, master_id, user, edit=False):
         raise HTTPException(404, 'Master not found')
     if edit and row['owner'] != user:
         raise HTTPException(403, 'Only this master can edit the schedule')
+    if not row['owner'].startswith('demo:') and row['owner']!=user:
+        public=db.execute('SELECT published FROM master_publication WHERE master_id=?',(master_id,)).fetchone()
+        if not public or not public['published']:
+            raise HTTPException(404,'Master not found')
     return row
 
 
@@ -184,6 +195,8 @@ def serialize_master(db, row, user):
     result['weekly'] = json.loads(row['weekly'])
     result['can_edit'] = row['owner'] == user
     result['demo'] = row['owner'].startswith('demo:')
+    publication=db.execute('SELECT published FROM master_publication WHERE master_id=?',(row['id'],)).fetchone()
+    result['published']=result['demo'] or bool(publication and publication['published'])
     result['services'] = [dict(service) for service in db.execute('SELECT * FROM services WHERE master_id=? ORDER BY id', (row['id'],))]
     result['overrides'] = {r['day']:json.loads(r['windows']) for r in db.execute('SELECT * FROM day_overrides WHERE master_id=?', (row['id'],))}
     return result
@@ -257,8 +270,27 @@ def router(connection, owner):
         user=owner(request)
         with connection() as db:
             seed_workspace(db,user)
-            rows=db.execute("SELECT * FROM masters WHERE owner=?" if user.startswith('demo:') else "SELECT * FROM masters WHERE owner NOT LIKE 'demo:%'", (user,) if user.startswith('demo:') else ())
+            rows=db.execute("SELECT * FROM masters WHERE owner=?" if user.startswith('demo:') else "SELECT * FROM masters m WHERE owner NOT LIKE 'demo:%' AND (owner=? OR EXISTS (SELECT 1 FROM master_publication p WHERE p.master_id=m.id AND p.published=1)) ORDER BY CASE WHEN owner=? THEN 0 ELSE 1 END,name", (user,) if user.startswith('demo:') else (user,user))
             return [serialize_master(db,row,user) for row in rows]
+
+    @routes.get('/catalog')
+    def catalog():
+        with connection() as db:
+            rows=db.execute("SELECT m.* FROM masters m JOIN master_publication p ON p.master_id=m.id WHERE p.published=1 AND m.owner NOT LIKE 'demo:%' ORDER BY m.name")
+            return [serialize_master(db,row,'') for row in rows]
+
+    @routes.post('/masters/{master_id}/publication')
+    def publication(master_id:str,data:Publication,request:Request):
+        user=edit_owner(request)
+        with connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            master=master_for(db,master_id,user,True)
+            revision_check(master,data.revision)
+            if data.published and (not any(json.loads(master['weekly']).values()) or not db.execute('SELECT 1 FROM services WHERE master_id=? AND active=1',(master_id,)).fetchone()):
+                raise HTTPException(422,'Add an active service and at least one working day')
+            db.execute('INSERT INTO master_publication VALUES(?,?) ON CONFLICT(master_id) DO UPDATE SET published=excluded.published',(master_id,int(data.published)))
+            db.execute('UPDATE masters SET revision=revision+1 WHERE id=?',(master_id,))
+            return serialize_master(db,master_for(db,master_id,user),user)
 
     @routes.post('/masters',status_code=201)
     def create_master(data: MasterInput,request: Request):
@@ -350,7 +382,7 @@ def router(connection, owner):
 
     @routes.get('/calendar/availability')
     def availability(request:Request,master_id:str,service_id:str,day:date):
-        user=owner(request)
+        user=owner(request) if request.session.get('user') or request.headers.get('authorization') else ''
         with connection() as db:
             # Generation and configuration edits use the same writer lock, so a
             # response never materializes a mixture of two schedule revisions.
@@ -388,7 +420,7 @@ def router(connection, owner):
             zone=ZoneInfo(master['timezone'])
             start=int(datetime.combine(day,datetime.min.time(),zone).timestamp())
             end=int(datetime.combine(day+timedelta(days=1),datetime.min.time(),zone).timestamp())
-            rows=db.execute("SELECT b.id,b.status,s.service,s.start,s.end FROM bookings b JOIN slots s ON s.id=b.slot WHERE s.master=? AND s.start>=? AND s.start<? ORDER BY s.start",(master_id,start,end))
+            rows=db.execute("SELECT b.id,b.status,s.service,s.start,s.end,COALESCE(p.display_name,'Клиент') AS customer_name FROM bookings b JOIN slots s ON s.id=b.slot LEFT JOIN profiles p ON p.owner=b.owner WHERE s.master=? AND s.start>=? AND s.start<? ORDER BY s.start",(master_id,start,end))
             return [dict(row) for row in rows]
 
     return routes
